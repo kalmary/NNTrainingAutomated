@@ -168,3 +168,4 @@ cython_debug/
 .claudeignore
 CLAUDE.md
 .mcp.json
+claude/
