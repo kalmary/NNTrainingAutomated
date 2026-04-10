@@ -35,8 +35,8 @@ from RandLANet_CB import RandLANet
 
 def check_models(model,
                  model_configs_paths: list,
-                 max_input_size = (1, 8192, 4),
-                 max_memory_GB = 20,
+                 max_input_size: tuple  = (1, 8192, 4),
+                 max_memory_GB: int = 20,
                  verbose: bool = False) -> tuple[list[dict], list[pth.Path]]:
     
     valid_configs = []
@@ -71,8 +71,7 @@ def check_models(model,
                 print(f"{path.name} failed: {e}")
         
         finally:
-            if 'instance' in locals():
-                del instance
+            del instance
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
