@@ -30,13 +30,11 @@ from _train_single_case import train_model
 from utils import load_json, save2json, save_model, convert_str_values
 from utils import Plotter
 
-from RandLANet_CB import RandLANet
-
 
 def check_models(model,
                  model_configs_paths: list,
-                 max_input_size: tuple  = (1, 8192, 4),
-                 max_memory_GB: int = 20,
+                 max_input_size: tuple,
+                 max_memory_GB: int,
                  verbose: bool = False) -> tuple[list[dict], list[pth.Path]]:
     
     valid_configs = []
@@ -77,19 +75,6 @@ def check_models(model,
                 torch.cuda.empty_cache()
     
     return valid_configs, valid_paths
-
-"""
-# Create a factory that knows about num_classes
-# It only needs 'cfg' to be provided later by the loop
-my_factory = lambda cfg: RandLANet(model_config=cfg, num_classes=10)
-
-# Run the check
-configs, paths = check_models(
-    model_factory=my_factory,
-    model_configs_paths=my_list_of_paths,
-    verbose=True
-)
-"""
 
 
 def get_step_list(params: list[Union[int, float]]) -> list[Union[int, float]]:
@@ -142,7 +127,18 @@ def get_factor_list(params: list[float]) -> list[float]:
     sequence.sort()
     return sequence
 
-    
+"""
+{
+    "learning_rate": [0.01, 0.0001, 0.1],
+    "batch_size": [8, 32, 8],
+    "num_classes": 10,
+    "param_types": {
+        "learning_rate": "factor",
+        "batch_size": "step",
+        "num_clases": "static"
+    }
+}
+"""    
 
 def generate_experiment_configs(training_config: dict, 
                                 model_configs_list: Sequence[dict],
