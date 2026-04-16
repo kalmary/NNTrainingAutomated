@@ -65,7 +65,10 @@ class Checkpoint:
                                      result_hist['miou_hist'], result_hist['miou_v_hist'])
             self.logger.info(f'Plots updated in {self.plot_dir}')
 
-
+def train_single_score(result_hist:dict) -> float:
+    acc = result_hist['acc_v_hist'][-1]
+    loss = result_hist['loss_v_hist'][-1]
+    return 0.6 * acc + 0.4 / (1 + loss)
 
 class TrainAutomated():
     def __init__(self, model_cls: type, device: Literal['cuda', 'gpu', 'cpu'], max_memory_GB: int, max_input_size:tuple, base_dir: Union[str, pth.Path] = pth.Path(__file__).parent) -> None:
@@ -210,10 +213,8 @@ class TrainAutomated():
                     desc=f"Training {model_name}", unit="repeat")
 
         for model, result_hist in pbar:
-            val_acc = result_hist['acc_v_hist'][-1]
-            val_loss = result_hist['loss_v_hist'][-1]
-            score = 0.6 * val_acc + 0.4 * (1 / (1 + val_loss))
-            self.logger.info(f'Repeat done — val_acc={val_acc:.3f} val_loss={val_loss:.3f} score={score:.3f}')
+            score = train_single_score(result_hist)
+            self.logger.info(f'Repeat done — val_acc={result_hist['acc_v_hist'][-1]:.3f} val_loss={result_hist["loss_v_hist"][-1]:.3f} score={score:.3f}')
             checkpoint.check_checkpoint(model, score, exp_config, result_hist)
 
         self.logger.info(f'STOP: train_single. Best score: {checkpoint.final_val_best:.3f}')
