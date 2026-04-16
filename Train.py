@@ -70,6 +70,26 @@ def train_single_score(result_hist:dict) -> float:
     loss = result_hist['loss_v_hist'][-1]
     return 0.6 * acc + 0.4 / (1 + loss)
 
+class TrialScoreTracker:
+    """Tracks best-so-far metrics across epochs and computes a trial score."""
+
+    def __init__(self):
+        self.best_acc = 0.0
+        self.best_loss = float('inf')
+        self.best_miou = 0.0
+
+    def update(self, result_hist: dict) -> float:
+        """Update running bests from latest epoch, return current score."""
+        self.best_acc = max(self.best_acc, result_hist['acc_v_hist'][-1])
+        self.best_miou = max(self.best_miou, result_hist['miou_v_hist'][-1])
+        self.best_loss = min(self.best_loss, result_hist['loss_v_hist'][-1])
+        return self._score()
+
+    def _score(self) -> float:
+        normalized_loss = 1 / (1 + self.best_loss)
+        return 0.4 * self.best_acc + 0.2 * normalized_loss + 0.4 * self.best_miou
+
+
 class TrainAutomated():
     def __init__(self, model_cls: type, device: Literal['cuda', 'gpu', 'cpu'], max_memory_GB: int, max_input_size:tuple, base_dir: Union[str, pth.Path] = pth.Path(__file__).parent) -> None:
         self.model_cls = model_cls
@@ -274,6 +294,31 @@ class TrainAutomated():
         for key, value in model_config.items():
             self.logger.info(f' model_config.{key}: {value}')
 
+        tracker = TrialScoreTracker()
+        score = 0.0
+
+        for epoch_idx, (model, result_hist) in enumerate(train_model(training_dict=trial_config)):
+
+            if model is None or not result_hist:
+                self.logger.error(f'Trial {trial.number}: empty result_hist at epoch {epoch_idx}, pruning.')
+                trial.report(0.0, step=epoch_idx)
+                raise optuna.exceptions.TrialPruned()
+
+            score = tracker.update(result_hist)
+            checkpoint.check_checkpoint(model, score, trial_config, result_hist)
+
+            self.logger.info(
+                f'Trial {trial.number} epoch {epoch_idx+1}/{trial_config["epochs"]}: '
+                f'score={score:.3f} {vars(tracker)}'
+            )
+
+            trial.report(score, step=epoch_idx)
+            if trial.should_prune():
+                self.logger.info(f'Pruning trial {trial.number} at epoch {epoch_idx+1}.')
+                raise optuna.exceptions.TrialPruned()
+
+        self.logger.info(f'STOP: objective_function (trial {trial.number}, final score {score:.3f})')
+        return score
 
     def run(self, model_name:str, mode:Literal[0, 1, 2], device):
         pass
