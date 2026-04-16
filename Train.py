@@ -135,9 +135,10 @@ class TrainAutomated():
         if isinstance(mode, int):
             if mode not in [0, 1, 2]:
                 raise ValueError(f"Invalid mode: {mode}. Must be:\n" \
-                                "0 - test" \
+                                "0 - test," \
                                 "1 - single_training," \
-                                "2 - multiple trainings, with optuna.")
+                                "2 - multiple trainings, with optuna," \
+                                "3 - Check models.")
 
         config_files_dir = self.base_dir.joinpath('training_configs')
         model_configs_dir = self.base_dir.joinpath('model_configs')
@@ -219,6 +220,59 @@ class TrainAutomated():
 
         self.logger.info(f'STOP: train_single. Best score: {checkpoint.final_val_best:.3f}')
 
+    def _suggest_from_spec(self, trial, name, spec):
+
+        if not isinstance(spec, list):
+            return spec
+        
+        if all(isinstance(x, str) for x in spec):
+            return trial.suggest_categorical(name, spec)
+
+        if all(isinstance(x, bool) for x in spec):
+            return trial.suggest_categorical(name, spec)
+        
+        is_int = all(isinstance(x, int) for x in spec)
+        is_num = all(isinstance(x, (int, float)) for x in spec)
+
+        if not is_num:
+            raise ValueError(f"Spec '{name}' has mixed/unsupported types: {spec}")
+        
+        suggest = trial.suggest_int if is_int else trial.suggest_float
+        low, high = spec[0], spec[1]
+
+        if len(spec) == 3:
+            return suggest(name, low, high, step=spec[2])
+        if len(spec) == 2:
+            return suggest(name, low, high, log = True)
+        
+        raise ValueError(f"Spec '{name}' must have 2 or 3 elements, got {len(spec)}: {spec}")
+
+
+    def objective_function(self, trial, exp_config, model_name, model_configs_list, checkpoint):
+        
+        model_config_index = trial.suggest_categorical('model_config_index', list(range(len(model_configs_list))))
+        model_config = model_configs_list[model_config_index]
+
+        trial_config = {
+            key: self._suggest_from_spec(trial, key, value)
+            for key, value in exp_config.items()
+        }
+
+        # these parameters should be already writen in the configs
+        trial_config['train_repeat'] = 1
+        model_config['num_neighbors'] = trial_config['num_neighbors']
+        model_config['num_classes'] = trial_config['num_classes']
+
+
+        trial_config["model_config"] = model_config
+        self.logger.info(f'Generated exp_config for trial: {trial.number}')
+
+        self.logger.info(f'Trial {trial.number} config:')
+        for key, value in trial_config.items():
+            if key != 'model_config':
+                self.logger.info(f' {key}: {value}')
+        for key, value in model_config.items():
+            self.logger.info(f' model_config.{key}: {value}')
 
 
     def run(self, model_name:str, mode:Literal[0, 1, 2], device):
