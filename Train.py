@@ -116,7 +116,6 @@ class TrainAutomated():
         self.max_input_size = max_input_size
         self.base_dir = pth.Path(base_dir)
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"Train Automated: Using device: {self.device} (requested: '{device}').")
         self.n_trials = n_trials
         self.n_startup = n_startup
         self.n_warmup_steps = n_warmup_steps
@@ -161,7 +160,7 @@ class TrainAutomated():
 
 
 
-    def load_config(self, device, mode: int = 0):
+    def load_config(self, device: str, mode: int = 0):
 
         """
         Load configuration files and prepare experiment configurations for training.
@@ -288,7 +287,7 @@ class TrainAutomated():
         raise ValueError(f"Spec '{name}' must have 2 or 3 elements, got {len(spec)}: {spec}")
 
 
-    def objective_function(self, trial, exp_config, model_configs_list, checkpoint):
+    def objective_function(self, trial: optuna.Trial, exp_config: dict, model_configs_list: list[dict], checkpoint:Checkpoint):
         
         model_config_index = trial.suggest_categorical('model_config_index', list(range(len(model_configs_list))))
         model_config = model_configs_list[model_config_index]
@@ -340,7 +339,7 @@ class TrainAutomated():
         self.logger.info(f'STOP: objective_function (trial {trial.number}, final score {score:.3f})')
         return score
 
-    def optuna_based_training(self, exp_config, model_name):
+    def optuna_based_training(self, exp_config: dict, model_name: str):
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.logger.info('START: optuna_based_training.')
 
@@ -411,7 +410,7 @@ class TrainAutomated():
         self.logger.info('STOP: optuna_based_training')
 
 
-    def argparser(self):
+    def _argparser(self):
         
         """
         Parse command-line arguments for automated CNN training pipeline configuration.
@@ -465,7 +464,7 @@ class TrainAutomated():
 
     def run(self):
         multiprocessing.set_start_method('spawn', force=True)
-        args = self.argparser()
+        args = self._argparser()
 
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
