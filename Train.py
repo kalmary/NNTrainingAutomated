@@ -10,6 +10,7 @@ from _train_single_case import train_model
 from tqdm import tqdm
 import datetime
 import argparse
+import multiprocessing
 
 from utils import load_json, save2json, save_model, convert_str_values
 from utils import Plotter
@@ -103,7 +104,6 @@ class TrialScoreTracker:
 class TrainAutomated():
     def __init__(self, 
                  model_cls: type, 
-                 device: Literal['cuda', 'gpu', 'cpu'], 
                  max_memory_GB: int, 
                  max_input_size:tuple, 
                  base_dir: Union[str, pth.Path] = pth.Path(__file__).parent, 
@@ -112,7 +112,6 @@ class TrainAutomated():
                  n_warmup_steps: int = 15, 
                  interval_steps: int = 15) -> None:
         self.model_cls = model_cls
-        self.device = torch.device('cuda') if (('cuda' in device or 'gpu' in device) and torch.cuda.is_available()) else torch.device('cpu')
         self.max_memory_GB = max_memory_GB
         self.max_input_size = max_input_size
         self.base_dir = pth.Path(base_dir)
@@ -162,7 +161,7 @@ class TrainAutomated():
 
 
 
-    def load_config(self, mode: int = 0):
+    def load_config(self, device, mode: int = 0):
 
         """
         Load configuration files and prepare experiment configurations for training.
@@ -204,9 +203,9 @@ class TrainAutomated():
         assert model_configs_list, "No models compiled. Check model_configs - most likely too big models are defined"
 
         if mode == 2:
-            training_config['device'] = self.device
+            training_config['device'] = device
             
-            self.logger.info(f'Loaded device: {self.device}')
+            self.logger.info(f'Loaded device: {device}')
             self.logger.info('STOP: load_config. All files loaded.')
 
             training_config['model'] = None
@@ -218,7 +217,7 @@ class TrainAutomated():
 
             training_config['model'] = None
             training_config['model_config'] = model_configs_list[0]
-            training_config['device'] = self.device
+            training_config['device'] = device
 
             exp_configs = [training_config]
 
@@ -412,7 +411,7 @@ class TrainAutomated():
         self.logger.info('STOP: optuna_based_training')
 
 
-    def argparser():
+    def argparser(self):
         
         """
         Parse command-line arguments for automated CNN training pipeline configuration.
@@ -464,5 +463,49 @@ class TrainAutomated():
 
         return parser.parse_args()
 
-    def run(self, model_name:str, mode:Literal[0, 1, 2], device):
-        pass
+    def run(self):
+        multiprocessing.set_start_method('spawn', force=True)
+        args = self.argparser()
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+        log_dir = pth.Path(__file__).parent.joinpath('logs')
+        log_dir.mkdir(exist_ok=True, parents=True)
+
+        log_file_name = f'{args.model_name}_{timestamp}_training.log'
+        log_file_path = log_dir.joinpath(log_file_name)
+
+        self.logger.setLevel(logging.INFO)
+        file_handler = logging.FileHandler(log_file_path, mode='a')
+        file_handler.setLevel(logging.DEBUG)
+
+        formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        self.logger.addHandler(file_handler)
+
+        self.logger.info(f"PROGRAM START: {args.model_name}")
+
+        device = args.device.lower()
+        model_name = args.model_name
+        mode = args.mode
+
+        if mode != 3:
+            exp_configs  = self.load_config(device=device, mode = mode)
+
+        if mode == 0:
+            self.test_case(exp_config=exp_configs[0])
+
+        elif mode == 1:
+            self.train_single(exp_config=exp_configs, model_name=model_name)
+        
+        elif mode == 2:
+            self.optuna_based_training(exp_config=exp_configs, model_name=model_name)
+
+        elif mode == 3:
+            model_configs_dir = self.base_dir.joinpath('model_configs')
+            model_configs_paths_list = list(model_configs_dir.rglob('*.json'))
+
+            self.check_models(model_configs_paths=model_configs_paths_list)
