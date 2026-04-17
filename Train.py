@@ -7,7 +7,9 @@ import gc
 import logging
 from typing import Literal, Union
 from _train_single_case import train_model
-import tqdm
+from tqdm import tqdm
+import datetime
+import argparse
 
 from utils import load_json, save2json, save_model, convert_str_values
 from utils import Plotter
@@ -73,7 +75,10 @@ def train_single_score(result_hist:dict) -> float:
 class TrialScoreTracker:
     """Tracks best-so-far metrics across epochs and computes a trial score."""
 
-    def __init__(self):
+    def __init__(self, w_acc = 0.4, w_loss = 0.2, w_miou = 0.4):
+        self.w_acc = w_acc
+        self.w_loss = w_loss
+        self.w_miou = w_miou
         self.best_acc = 0.0
         self.best_loss = float('inf')
         self.best_miou = 0.0
@@ -87,19 +92,36 @@ class TrialScoreTracker:
 
     def _score(self) -> float:
         normalized_loss = 1 / (1 + self.best_loss)
-        return 0.4 * self.best_acc + 0.2 * normalized_loss + 0.4 * self.best_miou
+        return self.w_acc * self.best_acc + self.w_loss * normalized_loss + self.w_miou * self.best_miou
 
+    @property
+    def formula(self) -> str:
+        return (f'{self.w_acc} * val_acc '
+                f'+ {self.w_loss} * 1/(1+val_loss) '
+                f'+ {self.w_miou} * val_miou')
 
 class TrainAutomated():
-    def __init__(self, model_cls: type, device: Literal['cuda', 'gpu', 'cpu'], max_memory_GB: int, max_input_size:tuple, base_dir: Union[str, pth.Path] = pth.Path(__file__).parent) -> None:
+    def __init__(self, 
+                 model_cls: type, 
+                 device: Literal['cuda', 'gpu', 'cpu'], 
+                 max_memory_GB: int, 
+                 max_input_size:tuple, 
+                 base_dir: Union[str, pth.Path] = pth.Path(__file__).parent, 
+                 n_trials: int = 100, 
+                 n_startup: int = 3, 
+                 n_warmup_steps: int = 15, 
+                 interval_steps: int = 15) -> None:
         self.model_cls = model_cls
         self.device = torch.device('cuda') if (('cuda' in device or 'gpu' in device) and torch.cuda.is_available()) else torch.device('cpu')
         self.max_memory_GB = max_memory_GB
         self.max_input_size = max_input_size
         self.base_dir = pth.Path(base_dir)
         self.logger = logging.getLogger(__name__)
-
         self.logger.info(f"Train Automated: Using device: {self.device} (requested: '{device}').")
+        self.n_trials = n_trials
+        self.n_startup = n_startup
+        self.n_warmup_steps = n_warmup_steps
+        self.interval_steps = interval_steps
     
     def check_models(self, model_configs_paths: list) -> tuple[list[dict], list[pth.Path]]:
 
@@ -152,13 +174,12 @@ class TrainAutomated():
         """
         self.logger.info('START: case_based_training.')
 
-        if isinstance(mode, int):
-            if mode not in [0, 1, 2]:
-                raise ValueError(f"Invalid mode: {mode}. Must be:\n" \
-                                "0 - test," \
-                                "1 - single_training," \
-                                "2 - multiple trainings, with optuna," \
-                                "3 - Check models.")
+        if mode not in [0, 1, 2]:
+            raise ValueError(f"Invalid mode: {mode}. Must be:\n" \
+                            "0 - test," \
+                            "1 - single_training," \
+                            "2 - multiple trainings, with optuna," \
+                            "3 - Check models.")
 
         config_files_dir = self.base_dir.joinpath('training_configs')
         model_configs_dir = self.base_dir.joinpath('model_configs')
@@ -268,7 +289,7 @@ class TrainAutomated():
         raise ValueError(f"Spec '{name}' must have 2 or 3 elements, got {len(spec)}: {spec}")
 
 
-    def objective_function(self, trial, exp_config, model_name, model_configs_list, checkpoint):
+    def objective_function(self, trial, exp_config, model_configs_list, checkpoint):
         
         model_config_index = trial.suggest_categorical('model_config_index', list(range(len(model_configs_list))))
         model_config = model_configs_list[model_config_index]
@@ -319,6 +340,129 @@ class TrainAutomated():
 
         self.logger.info(f'STOP: objective_function (trial {trial.number}, final score {score:.3f})')
         return score
+
+    def optuna_based_training(self, exp_config, model_name):
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.logger.info('START: optuna_based_training.')
+
+        pruner = optuna.pruners.MedianPruner(n_startup_trials=self.n_startup, n_warmup_steps=self.n_warmup_steps, interval_steps=self.interval_steps)
+        self.logger.info(f'Pruner created: parameters: n_startup_trials: {self.n_startup}, n_warmup_step: {self.n_warmup_steps}, interval_steps: {self.interval_steps}')
+
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(),
+            study_name = f'{model_name}_{timestamp}',
+            storage='sqlite:///db.sqlite3',
+            directions=['maximize'],
+            pruner=pruner)
+        self.logger.info('Study created. Check ')
+
+        model_configs = exp_config[1]
+        exp_config = exp_config[0]
+
+        train_repeat_old = exp_config['train_repeat']
+
+        # Create progress bar
+        pbar = tqdm(total=self.n_trials, desc="Optuna Optimization", unit="trial")
+
+        def callback(study, trial):
+            pbar.update(1)
+            try:
+                pbar.set_postfix({
+                    "Trial": trial.number,
+                    "Best Value": f"{study.best_value:.4f}",
+                    "Current": f"{trial.value:.4f}" if trial.value else "Pruned"
+                })
+            except ValueError:
+                pbar.set_postfix({"Status": "Pruned"})
+
+        checkpoint = Checkpoint(model_name=model_name, 
+                                base_dir=self.base_dir, 
+                                existing_ok=False)  
+
+        # Single optimize call with callback
+        study.optimize(lambda trial: self.objective_function(trial,
+                                                        exp_config=exp_config,
+                                                        model_configs_list=model_configs,
+                                                        checkpoint=checkpoint),
+                    n_trials=self.n_trials,
+                    callbacks=[callback])
+
+        pbar.close()
+        best_trial = study.best_trial
+        best_params = best_trial.params
+        best_value = best_trial.value
+
+        tracker = TrialScoreTracker()
+        self.logger.info(f'Optimization finished. Best value of formula: {tracker.formula} = {best_value:.4f}')
+
+        best_model_config = model_configs[best_params.pop('model_config_index')] 
+
+        final_exp_config = exp_config.copy()
+        final_exp_config.update(best_params)
+        final_exp_config.update({'train_repeat': train_repeat_old})
+
+
+        final_exp_config['model_config'] = best_model_config
+
+        print('Training the best model last time: ')
+
+        self.train_single(final_exp_config,
+                            model_name=model_name) # FIXME inproper dict creation
+        
+        self.logger.info('STOP: optuna_based_training')
+
+
+    def argparser():
+        
+        """
+        Parse command-line arguments for automated CNN training pipeline configuration.
+        Accepts model naming, computational device selection (CPU/CUDA/GPU), and optional test mode activation.
+        Returns parsed arguments with validation for device choices and formatted help text display.
+        """
+
+        parser = argparse.ArgumentParser(
+            description="Script for training the model based on predefined range of scenarios",
+            formatter_class=argparse.RawTextHelpFormatter
+        )
+
+        parser.add_argument(
+            '--model_name',
+            type=str,
+            help=(
+                "Base of the model's name.\n"
+                "When iterating, name also gets an ID."
+            )
+        )
+
+        
+        # Flag definition
+        parser.add_argument(
+            '--device',
+            type=str,
+            default='cpu',
+            choices=['cpu', 'cuda', 'gpu'], # choice limit
+            help=(
+                "Device for tensor based computation.\n"
+                "Pick 'cpu' or 'cuda'/ 'gpu'.\n"
+            )
+        )
+
+        parser.add_argument(
+            '--mode',
+            type=int,
+            default=0,
+            choices=[0, 1, 2, 3], # choice limit
+            help=(
+                "Device for tensor based computation.\n"
+                'Pick:\n'
+                '0: test\n'
+                '1: single training\n'
+                '2: multiple trainings, with optuna\n'
+                '3: only check models'
+            )
+        )
+
+        return parser.parse_args()
 
     def run(self, model_name:str, mode:Literal[0, 1, 2], device):
         pass
